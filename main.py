@@ -1,34 +1,37 @@
 # BTC Race 24h — btc-race-24h-20261117-0603
-# Fresh build for this instance (dev window 16 Nov 06:03 UTC -> 17 Nov 06:03 UTC,
-# +0.49% up, choppy). Long-only, 1 position, probe-first entries.
+# Kandidat D: "dip 0,50% awal + exit pump 3% + fallback all-in" —
+# REVISI SPESIFIKASI USER atas kandidat C (15:17 WIB 17 Nov 2026).
+# Turunan C dengan DUA angka diganti (DIP_BPS 200->50, EXIT_BPS
+# 30->300); seluruh struktur dan aturan lain IDENTIK dengan C.
+# Ditulis fresh di sesi builder ini.
+# ENTRI FINAL instance ini per keputusan user 16:48 WIB 17 Nov 2026:
+# kandidat D yang di-submit; v4 (probe-first, HEAD d927498) tetap
+# terarsip di histori git repo ini sebagai pembanding, tidak di-submit.
 #
-# Legs (all sizes in bps of equity; costs ~26 bps full round trip):
-#   A. Washout: 240-bar return <= -1.70% -> 20% probe, add to 100% on a
-#      bounce (+0.30% over probe cost) or a deeper dip (-0.80% under probe
-#      close). TP +1.50%, stop -2.50%, max hold 500 bars.
-#   B. Range dip: close <= SMA-90 - 0.48% while 240-bar return > -1.70%
-#      (below that, leg A owns the dip: one V-canyon cannot kill both legs)
-#      -> 30% probe, add to 100% on a real bounce (close >= probe close
-#      + 0.30% and up vs 3 bars ago) or a deeper dip (-0.80% vs
-#      SMA-90). Exit at SMA-90 + 0.70%, TP +1.50%, stop -2.50%, max 300 bars.
-#   C. Trend momentum (EMA-10/30 + 15-bar confirmation, 25% probe): TESTED
-#      in 5 variants on this dev window (plain cross, confirm 25/40/60 bps,
-#      15% size) — every variant earned less than range-only (+$14.77…
-#      +$17.92 vs +$18.51 range-only), so the leg is REMOVED for this
-#      instance. Range-dip + washout carry the entry; the shallow backup
-#      leg still guarantees at least one trade in a trend window with no
-#      dip.
-#   D. Shallow backup: if no filled trade by bar 480, a shallow dip
-#      (close <= SMA-20 - 0.15%, 240-bar return > -1.00%) buys a 20% probe
-#      so the entry can never sit out the whole race. Last-hour fallback:
-#      if still no trade by bar 1380, buy 50% on a dip, else buy 50% at
-#      bar 1410 and hold to the forced close.
-# Guards: global equity drawdown guard at -8% from peak (sell all +
-# 180-bar cooldown); no fresh entries in the last 30 bars except the
-# bar-1410 fallback buy; flat bars never trigger an entry.
+# Aturan (tanpa tambahan apa pun di luar spec):
+#   1. Referensi tetap = close bar pertama jendela (bar 0, harga
+#      pembuka race). Kaki dip aktif sejak bar 0.
+#   2. Kaki dip: pertama kali close <= referensi x (1 - 0,50%),
+#      BELI ALL-IN (100% ekuitas). Tepat SATU siklus.
+#   3. Exit kaki dip: JUAL SEMUA saat close >= harga masuk rata-rata
+#      x (1 + 3,00%) — "sell saat pump 3%", relatif terhadap harga
+#      beli. Bila tidak pernah tercapai sampai akhir: tahan sampai
+#      flatten paksa harness di close terakhir. TANPA stop loss,
+#      TANPA kunci lain.
+#   4. Fallback: dinilai SATU KALI di bar 1410 — bila saat itu bot
+#      TIDAK memegang posisi (dip tidak pernah datang, ATAU siklus
+#      dip sudah selesai terjual sebelum bar 1410), BELI ALL-IN di
+#      pasar dan tahan sampai akhir. Bila di bar 1410 posisi dip
+#      masih terbuka, fallback tidak berlaku sama sekali.
+#   5. Tidak ada kaki lain. Tidak ada probe. Tidak ada momentum.
+# Buy yang ditolak harness dicoba lagi selama kondisinya masih
+# berlaku, supaya "beli all-in" benar-benar terjadi — tetap tepat
+# satu posisi per kaki. Status kaki dicatat saat order terkirim
+# (pola yang sama dengan entri v4); penolakan terdeteksi dari
+# posisi yang tidak muncul dalam 2 batch, lalu kaki bersenjata lagi.
 #
-# Deterministic: decisions are pure functions of the closes seen so far.
-# No clock, no environment, no randomness, no network, stdlib only.
+# Deterministik: keputusan murni fungsi bar yang terlihat. Tanpa
+# jam, tanpa environment, tanpa randomness, stdlib saja.
 
 import os
 import sys
@@ -37,263 +40,131 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ven
 import makefun_bars
 
 SYMBOL = "CBBTC"
-BPS = 10_000
-SLIP_BPS = 300
+SCALE = 100_000_000
+DIP_BPS = 50            # dip 0,50% di bawah referensi bar 0 (revisi user 15:17 WIB)
+EXIT_BPS = 300          # jual semua di +3,00% di atas harga masuk rata-rata ("sell saat pump 3%")
+FALLBACK_BAR = 1410     # awal 30 menit terakhir
+SLIP_BPS = 300          # longgar supaya fill selamat saat open loncat
+MIN_ORDER = 1_000_000   # 1 USDC, minimum hello
 
-LOOKBACK = 240
-SMA_LONG = 90
-SMA_SHORT = 20
-
-# Leg A — washout (user band -1.50%..-2.20%; mid-point -1.70% chosen).
-WASH_TRIP_BPS = 170
-WASH_PROBE_BPS = 2000
-WASH_BOUNCE_BPS = 30
-WASH_DEEPER_BPS = 80
-WASH_TP_BPS = 150
-WASH_STOP_BPS = 250
-WASH_HOLD_BARS = 500
-WASH_RECOVER_BPS = 80  # re-arm only once 240-bar return is above -0.80%
-
-# Leg B — range dip (dip ~= 1/4 of the washout trip, per user guidance).
-RANGE_DIP_BPS = 48
-RANGE_PROBE_BPS = 3000
-RANGE_DEEPER_BPS = 80
-RANGE_EXIT_ABOVE_BPS = 70
-RANGE_TP_BPS = 150
-RANGE_STOP_BPS = 250
-RANGE_HOLD_BARS = 300
-RANGE_TURN_BARS = 3
-
-# (Leg C — trend momentum — removed after dev testing; see header.)
-
-# Leg D — shallow backup / last-hour fallback.
-BACKUP_ARM_BAR = 480
-BACKUP_DIP_BPS = 15
-BACKUP_PROBE_BPS = 2000
-BACKUP_TP_BPS = 80
-BACKUP_STOP_BPS = 150
-BACKUP_HOLD_BARS = 120
-LAST_HOUR_BAR = 1380
-LAST_BUY_BAR = 1410
-LAST_HOUR_SIZE_BPS = 5000
-
-DD_GUARD_BPS = 800  # -8% from peak equity: flatten + cooldown.
-DD_COOLDOWN_BARS = 180
-STOP_COOLDOWN_BARS = 60
-NO_NEW_AFTER_BAR = 1410
-
-# --- module state (rebuilt deterministically from the batch stream) ---
-_closes = []          # closes seen, ints
-_mode = None          # "wash" | "range" | "backup" | "lasthour" | None
-_entry_seq = -1       # seq of the first fill of the current position
-_probe_close = None   # close at which the probe was decided
-_added = False        # scale-in already done for this position
-_peak_equity = 0      # peak equity seen (micro-USDC)
-_cooldown_until = -1  # no new entries before this seq
-_wash_locked = False  # washout leg locked after a washout stop-out
-_trades = 0           # filled orders seen (excludes the final flatten)
+_ref = None             # close bar 0, dipatok sekali
+_dip_state = 0          # 0 = bersenjata, 1 = order terkirim/posisi terbuka, 2 = siklus selesai
+_dip_order_seq = -1     # bar saat buy dip terkirim
+_exit_sent = False      # sell exit +3,00% sudah terkirim
+_fallback_open = False  # buy fallback sudah terkirim / posisi fallback terbuka
+_fallback_over = False  # penilaian fallback di bar 1410 sudah lewat
+_fallback_buy = False   # penilaian bar 1410 memutuskan membeli (bot flat)
+_fb_order_seq = -1      # bar saat buy fallback terkirim
 
 
-def _sma(n):
-    if len(_closes) < n:
-        return None
-    return sum(_closes[-n:]) / n
+def on_hello(state):
+    global _ref, _dip_state, _dip_order_seq, _exit_sent
+    global _fallback_open, _fallback_over, _fallback_buy, _fb_order_seq
+    _ref = None
+    _dip_state = 0
+    _dip_order_seq = -1
+    _exit_sent = False
+    _fallback_open = False
+    _fallback_over = False
+    _fallback_buy = False
+    _fb_order_seq = -1
 
 
-def _ret240_bps():
-    if len(_closes) <= LOOKBACK:
-        return None
-    return (_closes[-1] - _closes[-1 - LOOKBACK]) * BPS // _closes[-1 - LOOKBACK]
-
-
-def _worth_above(cost, value, bps):
-    return value * BPS >= cost * (BPS + bps)
-
-
-def _worth_below(cost, value, bps):
-    return value * BPS <= cost * (BPS - bps)
-
-
-def _buy(state, notional):
-    notional = min(notional, state.cash)
+def _all_in(state):
+    size = state.equity
     room = state.weight_room(SYMBOL)
-    if room < notional:
-        notional = room
-    if notional < 1_000_000:  # min buy 1 USDC
-        return None
-    return {"side": "buy", "symbol": SYMBOL,
-            "notional_quote_units": int(notional),
-            "max_slippage_bps": SLIP_BPS}
-
-
-def _sell_all(state):
-    held = state.positions.get(SYMBOL)
-    if held is None or held.qty <= 0:
-        return None
-    return {"side": "sell", "symbol": SYMBOL, "qty": int(held.qty),
-            "max_slippage_bps": SLIP_BPS}
-
-
-def _probe_size(state, size_bps):
-    return state.equity * size_bps // BPS
-
-
-def _top_up(state):
-    """Buy enough to take the position to ~100% of equity, or None."""
-    held = state.positions.get(SYMBOL)
-    held_value = state.value(SYMBOL, held.qty) if held is not None else 0
-    need = state.equity - held_value
-    if need < 1_000_000:
-        return None
-    return _buy(state, need)
+    if size > room:
+        size = room
+    if size > state.cash:
+        size = state.cash
+    if size < MIN_ORDER:
+        return []
+    return [{"side": "buy", "symbol": SYMBOL,
+             "notional_quote_units": int(size),
+             "max_slippage_bps": SLIP_BPS}]
 
 
 def on_batch(state, batch):
-    global _mode, _entry_seq, _probe_close, _added
-    global _peak_equity, _cooldown_until, _wash_locked, _trades
-
-    for fill in batch.get("fills", []):
-        if fill.get("status") == "filled":
-            _trades += 1
+    global _ref, _dip_state, _dip_order_seq, _exit_sent
+    global _fallback_open, _fallback_over, _fallback_buy, _fb_order_seq
 
     bar = state.latest.get(SYMBOL)
     if bar is None:
         return []
-    close = int(bar["c"])
-    prev_close = _closes[-1] if _closes else None
-    _closes.append(close)
-    seq = state.seq
-
-    # Peak tracking for the drawdown guard (equity is marked at each close).
-    if state.equity > _peak_equity:
-        _peak_equity = state.equity
-
     if state.warming_up:
         return []
-
+    seq = state.seq
+    close = int(bar["c"])
     held = state.positions.get(SYMBOL)
-    if held is not None and _entry_seq < 0:
-        # Position appeared without our own entry bookkeeping (should not
-        # happen); adopt it as a range position so exits still work.
-        _mode, _entry_seq, _added = "range", seq, True
-        _probe_close = close
-    if held is None:
-        _mode, _entry_seq, _probe_close, _added = None, -1, None, False
 
-    r240 = _ret240_bps()
-    if r240 is not None and r240 > -WASH_RECOVER_BPS:
-        _wash_locked = False
+    # Patok referensi di bar pertama yang terlihat.
+    if _ref is None:
+        _ref = close
 
-    # --- global drawdown guard: flatten + cooldown ---
-    if held is not None and _peak_equity > 0:
-        if state.equity * BPS <= _peak_equity * (BPS - DD_GUARD_BPS):
-            _cooldown_until = seq + DD_COOLDOWN_BARS
-            if _mode == "wash":
-                _wash_locked = True
-            order = _sell_all(state)
-            return [order] if order else []
+    # --- rekonsiliasi kaki dip dengan posisi nyata ---
+    if _dip_state == 1 and held is None:
+        if _exit_sent:
+            _dip_state = 2          # exit terisi: siklus selesai
+        elif seq >= _dip_order_seq + 2:
+            _dip_state = 0          # buy ditolak: bersenjata lagi
 
-    # --- exits for an open position ---
-    if held is not None:
-        cost = held.cost
+    # --- rekonsiliasi fallback: buy ditolak -> boleh dicoba lagi ---
+    if _fallback_open and held is None and seq >= _fb_order_seq + 2 \
+            and _dip_state != 1:
+        _fallback_open = False
+
+    # Penilaian fallback gugur bila di bar 1410 posisi masih terbuka:
+    # bar 1410 adalah satu-satunya titik penilaian.
+    if seq >= FALLBACK_BAR and held is not None:
+        _fallback_over = True
+
+    # ---- posisi kaki dip terbuka: hanya exit +3,00% yang berlaku ----
+    if held is not None and _dip_state == 1:
+        # close >= entry_avg x (1 + EXIT_BPS/10000) persis setara
+        # dengan nilai posisi >= cost (termasuk fee) x faktor yang
+        # sama — perbandingan bebas satuan, memakai value/cost
+        # posisi dari SDK.
         value = state.value(SYMBOL, held.qty)
-        age = seq - _entry_seq
-        sma_long = _sma(SMA_LONG)
-        stop_bps = {"wash": WASH_STOP_BPS, "range": RANGE_STOP_BPS,
-                    "backup": BACKUP_STOP_BPS}.get(_mode, 250)
-        tp_bps = {"wash": WASH_TP_BPS, "range": RANGE_TP_BPS,
-                  "backup": BACKUP_TP_BPS}.get(_mode, 150)
-        hold_bars = {"wash": WASH_HOLD_BARS, "range": RANGE_HOLD_BARS,
-                     "backup": BACKUP_HOLD_BARS}.get(_mode, 300)
-        exit_now = False
-        exit_stop = False
-        if _worth_below(cost, value, stop_bps):
-            exit_now, exit_stop = True, True
-        elif _worth_above(cost, value, tp_bps):
-            exit_now = True
-        elif age >= hold_bars:
-            exit_now = True
-        elif _mode == "range" and sma_long is not None:
-            if close * BPS >= int(sma_long) * (BPS + RANGE_EXIT_ABOVE_BPS):
-                exit_now = True
-        if exit_now:
-            if exit_stop:
-                _cooldown_until = seq + STOP_COOLDOWN_BARS
-                if _mode == "wash":
-                    _wash_locked = True
-            order = _sell_all(state)
-            return [order] if order else []
-
-        # --- scale-in: add to full size once, on a bounce or deeper dip ---
-        if not _added and _probe_close is not None and _mode in ("wash", "range"):
-            deeper_bps = WASH_DEEPER_BPS if _mode == "wash" else RANGE_DEEPER_BPS
-            bounce = close * BPS >= _probe_close * (BPS + WASH_BOUNCE_BPS)
-            if _mode == "range":
-                sma_now = _sma(SMA_LONG)
-                deeper = (sma_now is not None
-                          and close * BPS <= int(sma_now) * (BPS - RANGE_DEEPER_BPS))
-                turn = (len(_closes) > RANGE_TURN_BARS
-                        and close > _closes[-RANGE_TURN_BARS - 1]
-                        and close * BPS >= _probe_close * (BPS + WASH_BOUNCE_BPS))
-                add = deeper or turn
-            else:
-                add = bounce or close * BPS <= _probe_close * (BPS - deeper_bps)
-            if add:
-                order = _top_up(state)
-                if order is not None:
-                    _added = True
-                    return [order]
+        if held.cost > 0 and value * 10_000 >= held.cost * (10_000 + EXIT_BPS):
+            if value >= MIN_ORDER:
+                _exit_sent = True
+                return [{"side": "sell", "symbol": SYMBOL,
+                         "qty": int(held.qty),
+                         "max_slippage_bps": SLIP_BPS}]
         return []
 
-    # --- entries (flat) ---
-    if seq >= NO_NEW_AFTER_BAR and not (seq == LAST_BUY_BAR and _trades == 0):
-        return []
-    if seq < _cooldown_until:
-        return []
-    if prev_close is not None and close == prev_close:
-        return []  # flat bar: no signal
-    if len(_closes) <= LOOKBACK:
+    # ---- posisi fallback terbuka: tahan sampai akhir, tanpa exit ----
+    if held is not None:
         return []
 
-    sma_long = _sma(SMA_LONG)
-    sma_short = _sma(SMA_SHORT)
+    # ---- flat: kaki dip (satu siklus, aktif sejak bar 0) ----
+    if _dip_state == 0 and close * 10_000 <= _ref * (10_000 - DIP_BPS):
+        orders = _all_in(state)
+        if orders:
+            _dip_state = 1
+            _dip_order_seq = seq
+            _exit_sent = False
+        return orders
 
-    # Leg A — washout.
-    if (r240 is not None and r240 <= -WASH_TRIP_BPS and not _wash_locked
-            and sma_long is not None):
-        order = _buy(state, _probe_size(state, WASH_PROBE_BPS))
-        if order is not None:
-            _mode, _entry_seq, _probe_close, _added = "wash", seq, close, False
-            return [order]
+    # ---- flat: penilaian fallback satu kali di bar 1410 ----
+    if seq >= FALLBACK_BAR and not _fallback_over:
+        _fallback_over = True
+        _fallback_buy = True  # sampai di sini berarti bot flat
+        orders = _all_in(state)
+        if orders:
+            _fallback_open = True
+            _fb_order_seq = seq
+        return orders
 
-    # Leg B — range dip (only above washout territory; leg A owns it below).
-    if (r240 is not None and r240 > -WASH_TRIP_BPS and sma_long is not None
-            and close * BPS <= int(sma_long) * (BPS - RANGE_DIP_BPS)):
-        order = _buy(state, _probe_size(state, RANGE_PROBE_BPS))
-        if order is not None:
-            _mode, _entry_seq, _probe_close, _added = "range", seq, close, False
-            return [order]
-
-    # Leg D — shallow backup: guarantee at least one trade by mid-race.
-    if (seq >= BACKUP_ARM_BAR and _trades == 0 and sma_short is not None
-            and r240 is not None and r240 > -100
-            and close * BPS <= int(sma_short) * (BPS - BACKUP_DIP_BPS)):
-        order = _buy(state, _probe_size(state, BACKUP_PROBE_BPS))
-        if order is not None:
-            _mode, _entry_seq, _probe_close, _added = "backup", seq, close, True
-            return [order]
-
-    # Leg D — last-hour fallback: buy on a dip, else at bar 1410, hold on.
-    if seq >= LAST_HOUR_BAR and _trades == 0:
-        dip = (sma_short is not None
-               and close * BPS <= int(sma_short) * (BPS - BACKUP_DIP_BPS))
-        if dip or seq >= LAST_BUY_BAR:
-            order = _buy(state, _probe_size(state, LAST_HOUR_SIZE_BPS))
-            if order is not None:
-                _mode, _entry_seq, _probe_close, _added = "lasthour", seq, close, True
-                return [order]
+    # Buy fallback ditolak di bar 1410: coba lagi selama masih flat.
+    if _fallback_buy and not _fallback_open:
+        orders = _all_in(state)
+        if orders:
+            _fallback_open = True
+            _fb_order_seq = seq
+        return orders
 
     return []
 
 
-makefun_bars.run(on_batch)
+makefun_bars.run(on_batch, on_hello=on_hello)
