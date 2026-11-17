@@ -10,9 +10,13 @@
 #      (below that, leg A owns the dip: one V-canyon cannot kill both legs)
 #      -> 30% probe, add to 100% on a turn-up or a deeper dip (-0.80% vs
 #      SMA-90). Exit at SMA-90 + 0.60%, TP +1.50%, stop -2.50%, max 300 bars.
-#   C. Trend momentum: EMA-8 > EMA-21 with EMA-21 rising, close > SMA-90,
-#      240-bar return in [-0.50%, +1.00%] -> 40% probe. Exit on EMA cross
-#      down, TP +1.20%, stop -1.20%, max 180 bars.
+#   C. Trend momentum (EMA-10/30 + 15-bar confirmation, 25% probe): TESTED
+#      in 5 variants on this dev window (plain cross, confirm 25/40/60 bps,
+#      15% size) — every variant earned less than range-only (+$14.77…
+#      +$17.92 vs +$18.51 range-only), so the leg is REMOVED for this
+#      instance. Range-dip + washout carry the entry; the shallow backup
+#      leg still guarantees at least one trade in a trend window with no
+#      dip.
 #   D. Shallow backup: if no filled trade by bar 720, a shallow dip
 #      (close <= SMA-20 - 0.25%, 240-bar return > -1.00%) buys a 20% probe
 #      so the entry can never sit out the whole race. Last-hour fallback:
@@ -38,8 +42,6 @@ SLIP_BPS = 300
 LOOKBACK = 240
 SMA_LONG = 90
 SMA_SHORT = 20
-EMA_FAST = 8
-EMA_SLOW = 21
 
 # Leg A — washout (user band -1.50%..-2.20%; mid-point -1.70% chosen).
 WASH_TRIP_BPS = 170
@@ -61,11 +63,7 @@ RANGE_STOP_BPS = 250
 RANGE_HOLD_BARS = 300
 RANGE_TURN_BARS = 3
 
-# Leg C — trend momentum.
-MOM_PROBE_BPS = 4000
-MOM_TP_BPS = 120
-MOM_STOP_BPS = 120
-MOM_HOLD_BARS = 180
+# (Leg C — trend momentum — removed after dev testing; see header.)
 
 # Leg D — shallow backup / last-hour fallback.
 BACKUP_ARM_BAR = 720
@@ -85,7 +83,7 @@ NO_NEW_AFTER_BAR = 1410
 
 # --- module state (rebuilt deterministically from the batch stream) ---
 _closes = []          # closes seen, ints
-_mode = None          # "wash" | "range" | "mom" | "backup" | "lasthour" | None
+_mode = None          # "wash" | "range" | "backup" | "lasthour" | None
 _entry_seq = -1       # seq of the first fill of the current position
 _probe_close = None   # close at which the probe was decided
 _added = False        # scale-in already done for this position
@@ -99,20 +97,6 @@ def _sma(n):
     if len(_closes) < n:
         return None
     return sum(_closes[-n:]) / n
-
-
-def _ema_on(series, period):
-    if len(series) < period:
-        return None
-    k = 2.0 / (period + 1)
-    e = float(series[0])
-    for c in series[1:]:
-        e = c * k + e * (1.0 - k)
-    return e
-
-
-def _ema(period):
-    return _ema_on(_closes, period)
 
 
 def _ret240_bps():
@@ -215,11 +199,11 @@ def on_batch(state, batch):
         age = seq - _entry_seq
         sma_long = _sma(SMA_LONG)
         stop_bps = {"wash": WASH_STOP_BPS, "range": RANGE_STOP_BPS,
-                    "mom": MOM_STOP_BPS, "backup": BACKUP_STOP_BPS}.get(_mode, 250)
+                    "backup": BACKUP_STOP_BPS}.get(_mode, 250)
         tp_bps = {"wash": WASH_TP_BPS, "range": RANGE_TP_BPS,
-                  "mom": MOM_TP_BPS, "backup": BACKUP_TP_BPS}.get(_mode, 150)
+                  "backup": BACKUP_TP_BPS}.get(_mode, 150)
         hold_bars = {"wash": WASH_HOLD_BARS, "range": RANGE_HOLD_BARS,
-                     "mom": MOM_HOLD_BARS, "backup": BACKUP_HOLD_BARS}.get(_mode, 300)
+                     "backup": BACKUP_HOLD_BARS}.get(_mode, 300)
         exit_now = False
         exit_stop = False
         if _worth_below(cost, value, stop_bps):
@@ -230,10 +214,6 @@ def on_batch(state, batch):
             exit_now = True
         elif _mode == "range" and sma_long is not None:
             if close * BPS >= int(sma_long) * (BPS + RANGE_EXIT_ABOVE_BPS):
-                exit_now = True
-        elif _mode == "mom":
-            ema_f, ema_s = _ema(EMA_FAST), _ema(EMA_SLOW)
-            if ema_f is not None and ema_s is not None and ema_f < ema_s:
                 exit_now = True
         if exit_now:
             if exit_stop:
@@ -291,19 +271,6 @@ def on_batch(state, batch):
         if order is not None:
             _mode, _entry_seq, _probe_close, _added = "range", seq, close, False
             return [order]
-
-    # Leg C — trend momentum.
-    ema_f, ema_s = _ema(EMA_FAST), _ema(EMA_SLOW)
-    if (ema_f is not None and ema_s is not None and sma_long is not None
-            and ema_f > ema_s and close > int(sma_long)
-            and r240 is not None and -50 <= r240 <= 100):
-        ema_prev = _ema_on(_closes[:-30], EMA_SLOW) if len(_closes) > 30 else None
-        rising = ema_prev is not None and ema_s > ema_prev
-        if rising:
-            order = _buy(state, _probe_size(state, MOM_PROBE_BPS))
-            if order is not None:
-                _mode, _entry_seq, _probe_close, _added = "mom", seq, close, True
-                return [order]
 
     # Leg D — shallow backup: guarantee at least one trade by mid-race.
     if (seq >= BACKUP_ARM_BAR and _trades == 0 and sma_short is not None
