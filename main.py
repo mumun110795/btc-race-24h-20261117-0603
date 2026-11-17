@@ -8,7 +8,8 @@
 #      close). TP +1.50%, stop -2.50%, max hold 500 bars.
 #   B. Range dip: close <= SMA-90 - 0.48% while 240-bar return > -1.70%
 #      (below that, leg A owns the dip: one V-canyon cannot kill both legs)
-#      -> 30% probe, add to 100% on a turn-up or a deeper dip (-0.80% vs
+#      -> 30% probe, add to 100% on a real bounce (close >= probe close
+#      + 0.30% and up vs 3 bars ago) or a deeper dip (-0.80% vs
 #      SMA-90). Exit at SMA-90 + 0.60%, TP +1.50%, stop -2.50%, max 300 bars.
 #   C. Trend momentum (EMA-10/30 + 15-bar confirmation, 25% probe): TESTED
 #      in 5 variants on this dev window (plain cross, confirm 25/40/60 bps,
@@ -232,7 +233,8 @@ def on_batch(state, batch):
                 deeper = (sma_now is not None
                           and close * BPS <= int(sma_now) * (BPS - RANGE_DEEPER_BPS))
                 turn = (len(_closes) > RANGE_TURN_BARS
-                        and close > _closes[-RANGE_TURN_BARS - 1])
+                        and close > _closes[-RANGE_TURN_BARS - 1]
+                        and close * BPS >= _probe_close * (BPS + WASH_BOUNCE_BPS))
                 add = deeper or turn
             else:
                 add = bounce or close * BPS <= _probe_close * (BPS - deeper_bps)
