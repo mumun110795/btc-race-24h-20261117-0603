@@ -10,7 +10,7 @@
 #      (below that, leg A owns the dip: one V-canyon cannot kill both legs)
 #      -> 30% probe, add to 100% on a real bounce (close >= probe close
 #      + 0.30% and up vs 3 bars ago) or a deeper dip (-0.80% vs
-#      SMA-90). Exit at SMA-90 + 0.60%, TP +1.50%, stop -2.50%, max 300 bars.
+#      SMA-90). Exit at SMA-90 + 0.70%, TP +1.50%, stop -2.50%, max 300 bars.
 #   C. Trend momentum (EMA-10/30 + 15-bar confirmation, 25% probe): TESTED
 #      in 5 variants on this dev window (plain cross, confirm 25/40/60 bps,
 #      15% size) — every variant earned less than range-only (+$14.77…
@@ -18,8 +18,8 @@
 #      instance. Range-dip + washout carry the entry; the shallow backup
 #      leg still guarantees at least one trade in a trend window with no
 #      dip.
-#   D. Shallow backup: if no filled trade by bar 720, a shallow dip
-#      (close <= SMA-20 - 0.25%, 240-bar return > -1.00%) buys a 20% probe
+#   D. Shallow backup: if no filled trade by bar 480, a shallow dip
+#      (close <= SMA-20 - 0.15%, 240-bar return > -1.00%) buys a 20% probe
 #      so the entry can never sit out the whole race. Last-hour fallback:
 #      if still no trade by bar 1380, buy 50% on a dip, else buy 50% at
 #      bar 1410 and hold to the forced close.
@@ -58,7 +58,7 @@ WASH_RECOVER_BPS = 80  # re-arm only once 240-bar return is above -0.80%
 RANGE_DIP_BPS = 48
 RANGE_PROBE_BPS = 3000
 RANGE_DEEPER_BPS = 80
-RANGE_EXIT_ABOVE_BPS = 60
+RANGE_EXIT_ABOVE_BPS = 70
 RANGE_TP_BPS = 150
 RANGE_STOP_BPS = 250
 RANGE_HOLD_BARS = 300
@@ -67,8 +67,8 @@ RANGE_TURN_BARS = 3
 # (Leg C — trend momentum — removed after dev testing; see header.)
 
 # Leg D — shallow backup / last-hour fallback.
-BACKUP_ARM_BAR = 720
-BACKUP_DIP_BPS = 25
+BACKUP_ARM_BAR = 480
+BACKUP_DIP_BPS = 15
 BACKUP_PROBE_BPS = 2000
 BACKUP_TP_BPS = 80
 BACKUP_STOP_BPS = 150
